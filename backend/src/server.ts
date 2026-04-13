@@ -86,25 +86,25 @@ app.get("/products", async (req, res, next) => {
 
 app.post("/reserve", async (req, res, next) => {
   try {
-const parsedBody = reserveSchema.parse(req.body);
-const { productId, quantity, userId } = parsedBody;
+    const parsedBody = reserveSchema.parse(req.body);
+    const { productId, quantity, userId } = parsedBody;
 
-const existingActiveReservation = await prisma.reservation.findFirst({
-  where: {
-    productId,
-    userId,
-    status: "ACTIVE",
-    expiresAt: {
-      gt: new Date(),
-    },
-  },
-});
+    const existingActiveReservation = await prisma.reservation.findFirst({
+      where: {
+        productId,
+        userId,
+        status: "ACTIVE",
+        expiresAt: {
+          gt: new Date(),
+        },
+      },
+    });
 
-if (existingActiveReservation) {
-  return res.status(409).json({
-    message: "User already has an active reservation for this product",
-  });
-}
+    if (existingActiveReservation) {
+      return res.status(409).json({
+        message: "User already has an active reservation for this product",
+      });
+    }
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
