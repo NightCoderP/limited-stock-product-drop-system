@@ -1,27 +1,27 @@
 import express from "express";
 import { prisma } from "./lib/prisma";
 import { reserveSchema } from "./validators/reservation.validator";
-import { z } from "zod";
 import { checkoutSchema } from "./validators/checkout.validator";
+import { errorHandler } from "./middleware/error.middleware";
 
 const app = express();
+
 app.use(express.json());
 
 app.get("/", (_req, res) => {
   res.send("API is running...");
 });
 
-app.get("/products", async (_req, res) => {
+app.get("/products", async (_req, res, next) => {
   try {
     const products = await prisma.product.findMany();
     return res.json(products);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Server error" });
+    next(error);
   }
 });
 
-app.post("/reserve", async (req, res) => {
+app.post("/reserve", async (req, res, next) => {
   try {
     const parsedBody = reserveSchema.parse(req.body);
     const { productId, quantity, userId } = parsedBody;
@@ -64,67 +64,11 @@ app.post("/reserve", async (req, res) => {
       data: reservation,
     });
   } catch (error) {
-  console.error(error);
-
-  if (error instanceof z.ZodError) {
-    return res.status(400).json({
-      message: "Validation failed",
-      errors: error.issues,
-    });
-  }
-
-  if (error instanceof Error && error.message === "NOT_ENOUGH_STOCK") {
-    return res.status(400).json({ message: "Not enough stock" });
-  }
-
-  return res.status(500).json({ message: "Server error" });
-}
-});
-
-app.post("/checkout", async (req, res) => {
-  try {
-    const { reservationId } = req.body;
-
-    if (!reservationId) {
-      return res.status(400).json({ message: "Reservation ID required" });
-    }
-
-    const reservation = await prisma.reservation.findUnique({
-      where: { id: reservationId },
-    });
-
-    if (!reservation) {
-      return res.status(404).json({ message: "Reservation not found" });
-    }
-
-    if (reservation.status !== "ACTIVE") {
-      return res.status(400).json({ message: "Reservation is not active" });
-    }
-
-    if (reservation.expiresAt < new Date()) {
-      return res.status(400).json({ message: "Reservation expired" });
-    }
-
-    const updated = await prisma.reservation.update({
-      where: { id: reservationId },
-      data: { status: "COMPLETED" },
-    });
-
-    return res.json({
-      message: "Checkout successful",
-      data: updated,
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Server error" });
+    next(error);
   }
 });
 
-app.listen(3001, () => {
-  console.log("Server running on http://localhost:3001");
-});
-
-app.post("/checkout", async (req, res) => {
+app.post("/checkout", async (req, res, next) => {
   try {
     const parsedBody = checkoutSchema.parse(req.body);
     const { reservationId } = parsedBody;
@@ -163,22 +107,11 @@ app.post("/checkout", async (req, res) => {
       data: updatedReservation,
     });
   } catch (error) {
-    console.error(error);
-
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: error.issues,
-      });
-    }
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    next(error);
   }
 });
 
-app.post("/cleanup", async (_req, res) => {
+app.post("/cleanup", async (_req, res, next) => {
   try {
     const now = new Date();
 
@@ -227,14 +160,23 @@ app.post("/cleanup", async (_req, res) => {
       cleanedCount,
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Server error" });
+    next(error);
   }
 });
 
+app.use(errorHandler);
+
+app.listen(3001, () => {
+  console.log("Server running on http://localhost:3001");
+});
+
 setInterval(async () => {
-  console.log("Running cleanup job...");
-  await fetch("http://localhost:3001/cleanup", {
-    method: "POST",
-  });
+  try {
+    console.log("Running cleanup job...");
+    await fetch("http://localhost:3001/cleanup", {
+      method: "POST",
+    });
+  } catch (error) {
+    console.error("Cleanup job failed:", error);
+  }
 }, 60 * 1000);
