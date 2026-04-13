@@ -1,21 +1,84 @@
 import express from "express";
+import cors from "cors";
 import { prisma } from "./lib/prisma";
 import { reserveSchema } from "./validators/reservation.validator";
 import { checkoutSchema } from "./validators/checkout.validator";
 import { errorHandler } from "./middleware/error.middleware";
+import { requestLogger } from "./middleware/logger.middleware";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: {
+    message: "Too many requests, please try again later.",
+  },
+});
+
+app.use(cors());
 app.use(express.json());
+app.use(requestLogger);
+app.use(limiter);
+app.use("/reserve", limiter);
+app.use("/checkout", limiter);
 
 app.get("/", (_req, res) => {
   res.send("API is running...");
 });
 
-app.get("/products", async (_req, res, next) => {
+app.get("/health", (_req, res) => {
+  return res.status(200).json({
+    message: "OK",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/products", async (req, res, next) => {
   try {
-    const products = await prisma.product.findMany();
-    return res.json(products);
+    const page = Number(req.query.page ?? 1);
+    const limit = Number(req.query.limit ?? 10);
+    const sortBy = String(req.query.sortBy ?? "createdAt");
+    const order = String(req.query.order ?? "desc");
+    const inStock = req.query.inStock;
+
+    const safePage = page > 0 ? page : 1;
+    const safeLimit = limit > 0 && limit <= 100 ? limit : 10;
+    const skip = (safePage - 1) * safeLimit;
+
+    const where =
+      inStock === "true"
+        ? {
+            availableStock: {
+              gt: 0,
+            },
+          }
+        : {};
+
+    const [products, total] = await prisma.$transaction([
+      prisma.product.findMany({
+        where,
+        skip,
+        take: safeLimit,
+        orderBy: {
+          [sortBy]: order === "asc" ? "asc" : "desc",
+        },
+      }),
+      prisma.product.count({ where }),
+    ]);
+
+    return res.status(200).json({
+      message: "Products fetched successfully",
+      data: products,
+      meta: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -23,8 +86,25 @@ app.get("/products", async (_req, res, next) => {
 
 app.post("/reserve", async (req, res, next) => {
   try {
-    const parsedBody = reserveSchema.parse(req.body);
-    const { productId, quantity, userId } = parsedBody;
+const parsedBody = reserveSchema.parse(req.body);
+const { productId, quantity, userId } = parsedBody;
+
+const existingActiveReservation = await prisma.reservation.findFirst({
+  where: {
+    productId,
+    userId,
+    status: "ACTIVE",
+    expiresAt: {
+      gt: new Date(),
+    },
+  },
+});
+
+if (existingActiveReservation) {
+  return res.status(409).json({
+    message: "User already has an active reservation for this product",
+  });
+}
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
@@ -53,6 +133,14 @@ app.post("/reserve", async (req, res, next) => {
           userId,
           quantity,
           expiresAt,
+        },
+      });
+
+      await tx.inventoryLog.create({
+        data: {
+          productId,
+          change: -quantity,
+          reason: "RESERVE",
         },
       });
 
@@ -102,6 +190,14 @@ app.post("/checkout", async (req, res, next) => {
       },
     });
 
+    await prisma.inventoryLog.create({
+      data: {
+        productId: reservation.productId,
+        change: 0,
+        reason: "CHECKOUT",
+      },
+    });
+
     return res.status(200).json({
       message: "Checkout successful",
       data: updatedReservation,
@@ -148,6 +244,14 @@ app.post("/cleanup", async (_req, res, next) => {
             availableStock: {
               increment: reservation.quantity,
             },
+          },
+        });
+
+        await tx.inventoryLog.create({
+          data: {
+            productId: reservation.productId,
+            change: reservation.quantity,
+            reason: "EXPIRE",
           },
         });
 
