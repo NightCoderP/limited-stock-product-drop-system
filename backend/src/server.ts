@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import path from "path";
 import { prisma } from "./lib/prisma";
 import { reserveSchema } from "./validators/reservation.validator";
 import { checkoutSchema } from "./validators/checkout.validator";
@@ -27,10 +28,6 @@ app.use(limiter);
 app.use("/reserve", limiter);
 app.use("/checkout", limiter);
 app.use(errorHandler);
-
-app.get("/", (_req, res) => {
-  res.send("API is running...");
-});
 
 app.get("/health", (_req, res) => {
   return res.status(200).json({
@@ -270,6 +267,13 @@ app.post("/cleanup", async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+const frontendPath = path.join(__dirname, "../public");
+app.use(express.static(frontendPath));
+
+app.get("/{*path}", (_req, res) => {
+  res.sendFile(path.join(frontendPath, "index.html"));
 });
 
 app.use(errorHandler);
