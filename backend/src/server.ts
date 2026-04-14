@@ -16,6 +16,9 @@ const limiter = rateLimit({
     message: "Too many requests, please try again later.",
   },
 });
+console.log("cors type:", typeof cors);
+console.log("requestLogger type:", typeof requestLogger);
+console.log("errorHandler type:", typeof errorHandler);
 
 app.use(cors());
 app.use(express.json());
@@ -23,6 +26,7 @@ app.use(requestLogger);
 app.use(limiter);
 app.use("/reserve", limiter);
 app.use("/checkout", limiter);
+app.use(errorHandler);
 
 app.get("/", (_req, res) => {
   res.send("API is running...");
