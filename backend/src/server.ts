@@ -9,25 +9,25 @@ import { requestLogger } from "./middleware/logger.middleware";
 import rateLimit from "express-rate-limit";
 
 const app = express();
+const PORT = Number(process.env.PORT) || 3001;
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     message: "Too many requests, please try again later.",
   },
-});
-console.log("cors type:", typeof cors);
-console.log("requestLogger type:", typeof requestLogger);
-console.log("errorHandler type:", typeof errorHandler);
+}) as express.RequestHandler;
 
 app.use(cors());
 app.use(express.json());
 app.use(requestLogger);
-app.use(limiter);
+
+// Sadece kritik endpoint'lere uygula
 app.use("/reserve", limiter);
 app.use("/checkout", limiter);
-app.use(errorHandler);
 
 app.get("/health", (_req, res) => {
   return res.status(200).json({
@@ -41,21 +41,36 @@ app.get("/products", async (req, res, next) => {
   try {
     const page = Number(req.query.page ?? 1);
     const limit = Number(req.query.limit ?? 10);
-    const sortBy = String(req.query.sortBy ?? "createdAt");
     const order = String(req.query.order ?? "desc");
     const inStock = req.query.inStock;
 
-    const safePage = page > 0 ? page : 1;
-    const safeLimit = limit > 0 && limit <= 100 ? limit : 10;
+    const allowedSortFields = [
+      "createdAt",
+      "updatedAt",
+      "name",
+      "totalStock",
+      "availableStock",
+    ] as const;
+
+    const requestedSortBy = String(req.query.sortBy ?? "createdAt");
+    const sortBy = allowedSortFields.includes(
+      requestedSortBy as (typeof allowedSortFields)[number]
+    )
+      ? requestedSortBy
+      : "createdAt";
+
+    const safePage = Number.isFinite(page) && page > 0 ? page : 1;
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0 && limit <= 100 ? limit : 10;
     const skip = (safePage - 1) * safeLimit;
 
     const where =
       inStock === "true"
         ? {
-            availableStock: {
-              gt: 0,
-            },
-          }
+          availableStock: {
+            gt: 0,
+          },
+        }
         : {};
 
     const [products, total] = await prisma.$transaction([
@@ -184,34 +199,59 @@ app.post("/checkout", async (req, res, next) => {
       });
     }
 
-    const updatedReservation = await prisma.reservation.update({
-      where: { id: reservationId },
-      data: {
-        status: "COMPLETED",
-      },
-    });
+    const updatedReservation = await prisma.$transaction(async (tx) => {
+      const updateResult = await tx.reservation.updateMany({
+        where: { id: reservationId, status: "ACTIVE" },
+        data: { status: "COMPLETED" },
+      });
 
-    await prisma.inventoryLog.create({
-      data: {
-        productId: reservation.productId,
-        change: 0,
-        reason: "CHECKOUT",
-      },
+      if (updateResult.count === 0) {
+        throw new Error("RESERVATION_ALREADY_PROCESSED");
+      }
+
+      await tx.product.update({
+        where: { id: reservation.productId },
+        data: {
+          totalStock: {
+            decrement: reservation.quantity,
+          },
+        },
+      });
+
+      await tx.order.create({
+        data: {
+          reservationId: reservation.id,
+        },
+      });
+
+      await tx.inventoryLog.create({
+        data: {
+          productId: reservation.productId,
+          change: -reservation.quantity,
+          reason: "CHECKOUT",
+        },
+      });
+
+      return tx.reservation.findUnique({ where: { id: reservationId } });
     });
 
     return res.status(200).json({
       message: "Checkout successful",
       data: updatedReservation,
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.message === "RESERVATION_ALREADY_PROCESSED") {
+      return res.status(409).json({ message: "Reservation was already processed or is no longer active" });
+    }
     next(error);
   }
 });
 
-app.post("/cleanup", async (_req, res, next) => {
-  try {
-    const now = new Date();
+async function runCleanup() {
+  let cleanedCount = 0;
 
+  while (true) {
+    const now = new Date();
     const expiredReservations = await prisma.reservation.findMany({
       where: {
         status: "ACTIVE",
@@ -219,9 +259,12 @@ app.post("/cleanup", async (_req, res, next) => {
           lt: now,
         },
       },
+      take: 50,
     });
 
-    let cleanedCount = 0;
+    if (expiredReservations.length === 0) {
+      break;
+    }
 
     for (const reservation of expiredReservations) {
       await prisma.$transaction(async (tx) => {
@@ -259,6 +302,14 @@ app.post("/cleanup", async (_req, res, next) => {
         cleanedCount += 1;
       });
     }
+  }
+
+  return cleanedCount;
+}
+
+app.post("/cleanup", async (_req, res, next) => {
+  try {
+    const cleanedCount = await runCleanup();
 
     return res.status(200).json({
       message: "Cleanup completed",
@@ -269,25 +320,37 @@ app.post("/cleanup", async (_req, res, next) => {
   }
 });
 
-const frontendPath = path.join(__dirname, "../public");
+// Frontend build path
+// Eğer backend/dist/server.js içinden çalışıyorsan ve frontend build output'u project-root/public ise bu doğru olur.
+// Eğer senin frontend build'in dist ise aşağıdaki "public" kısmını "dist" yap.
+const frontendPath = path.resolve(__dirname, "../public");
+
 app.use(express.static(frontendPath));
 
-app.get("/{*path}", (_req, res) => {
-  res.sendFile(path.join(frontendPath, "index.html"));
+// API route değilse index.html dön
+app.get(/.*/, (req, res, next) => {
+  if (req.path.startsWith("/health")) return next();
+  if (req.path.startsWith("/products")) return next();
+  if (req.path.startsWith("/reserve")) return next();
+  if (req.path.startsWith("/checkout")) return next();
+  if (req.path.startsWith("/cleanup")) return next();
+
+  return res.sendFile(path.join(frontendPath, "index.html"));
 });
 
+// Error handler en sonda olmalı
 app.use(errorHandler);
 
-app.listen(3001, () => {
-  console.log("Server running on http://localhost:3001");
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
+// Background cleanup job
 setInterval(async () => {
   try {
     console.log("Running cleanup job...");
-    await fetch("http://localhost:3001/cleanup", {
-      method: "POST",
-    });
+    const cleanedCount = await runCleanup();
+    console.log(`Cleanup completed. Cleaned: ${cleanedCount}`);
   } catch (error) {
     console.error("Cleanup job failed:", error);
   }
