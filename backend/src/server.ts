@@ -320,9 +320,7 @@ app.post("/cleanup", async (_req, res, next) => {
   }
 });
 
-// Frontend build path
-// Eğer backend/dist/server.js içinden çalışıyorsan ve frontend build output'u project-root/public ise bu doğru olur.
-// Eğer senin frontend build'in dist ise aşağıdaki "public" kısmını "dist" yap.
+
 const frontendPath = path.resolve(__dirname, "../public");
 
 app.use(express.static(frontendPath));
@@ -338,14 +336,14 @@ app.get(/.*/, (req, res, next) => {
   return res.sendFile(path.join(frontendPath, "index.html"));
 });
 
-// Error handler en sonda olmalı
+
 app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-// Background cleanup job
+
 setInterval(async () => {
   try {
     console.log("Running cleanup job...");
